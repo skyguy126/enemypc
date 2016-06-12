@@ -1,5 +1,12 @@
 import tornado.ioloop, tornado.template, tornado.web, tornado.httpserver, tornado.httputil
-import signal, os.path, steamapi, urllib, requests, json, re
+import signal, os.path, steamapi, urllib, requests, json
+
+#TODO
+#Make login async
+#Regex login to avoid bug
+#Gen secure cookie randomly associate with steam_id
+#https://jwt.io/introduction/
+#xss protection
 
 STEAM_API_KEY = ""
 
