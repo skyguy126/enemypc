@@ -1,7 +1,5 @@
-import tornado.ioloop, tornado.template, tornado.web, tornado.httpserver
+import tornado.ioloop, tornado.template, tornado.web, tornado.httpserver, tornado.httputil
 import signal, os.path, steamapi, urllib, requests, json, re
-
-PORT = 9999
 
 STEAM_API_KEY = ""
 
@@ -13,11 +11,19 @@ settings = {
 
 class MainHandler(tornado.web.RequestHandler):
 
+    def prepare(self):
+        if self.request.protocol == "http":
+            self.redirect("https://24.4.237.252:443/", permanent=False)
+
     def get(self):
         self.set_header("Content-type","text/html")
         self.render("index.html")
 
 class SearchHandler(tornado.web.RequestHandler):
+
+    def prepare(self):
+        if self.request.protocol == "http":
+            self.redirect("https://24.4.237.252:443/", permanent=False)
 
     def post(self):
         steam_id = self.get_argument("id")
@@ -27,24 +33,37 @@ class SearchHandler(tornado.web.RequestHandler):
 
 class HomeHandler(tornado.web.RequestHandler):
 
+    def prepare(self):
+        if self.request.protocol == "http":
+            self.redirect("https://24.4.237.252:443/", permanent=False)
+
     def get(self):
-        pass
+        self.write("Logged in!\n")
 
 class OidLoginHandler(tornado.web.RequestHandler):
+
+    def prepare(self):
+        if self.request.protocol == "http":
+            self.redirect("https://24.4.237.252:443/", permanent=False)
 
     #redirect to steam login page
     def get(self):
         params = {
             "openid.ns" : "http://specs.openid.net/auth/2.0",
             "openid.mode" : "checkid_setup",
-            "openid.return_to" : "http://24.4.237.252:9999/oid/auth",
-            "openid.realm" : "http://24.4.237.252",
+            "openid.return_to" : "https://24.4.237.252:443/oid/auth",
+            "openid.realm" : "https://24.4.237.252",
             "openid.identity" : "http://specs.openid.net/auth/2.0/identifier_select",
             "openid.claimed_id" : "http://specs.openid.net/auth/2.0/identifier_select"
         }
+
         self.redirect("https://steamcommunity.com/openid/login?" + urllib.urlencode(params))
 
 class OidAuthHandler(tornado.web.RequestHandler):
+
+    def prepare(self):
+        if self.request.protocol == "http":
+            self.redirect("https://24.4.237.252:443/", permanent=False)
 
     #validate credentials
     def get(self):
@@ -60,6 +79,7 @@ class OidAuthHandler(tornado.web.RequestHandler):
             "openid.return_to" : self.get_argument("openid.return_to"),
             "openid.response_nonce" : self.get_argument("openid.response_nonce")
         }
+
         steam64id = params["openid.identity"][36:]
         r = requests.post("https://steamcommunity.com/openid/login", params=params)
         if r.status_code == 200 and len(steam64id) == 17:
@@ -83,7 +103,7 @@ def make_app():
     ], cookie_secret=COOKIE_SECRET, **settings)
 
 if __name__ == "__main__":
-    print "Starting server on port: " + str(PORT)
+    print "Loading secure files..."
 
     with open("secure/apikey.txt", 'r') as f:
         STEAM_API_KEY = f.read().strip('\n')
@@ -93,12 +113,15 @@ if __name__ == "__main__":
     steamapi.core.APIConnection(api_key=STEAM_API_KEY)
     signal.signal(signal.SIGINT, signal.SIG_DFL)
 
-    http_server = tornado.httpserver.HTTPServer(make_app(), ssl_options={
+    print "Starting server..."
+
+    http_server = tornado.httpserver.HTTPServer(make_app())
+    http_server.listen(80)
+
+    https_server = tornado.httpserver.HTTPServer(make_app(), ssl_options={
         "certfile" : "secure/server.crt",
         "keyfile" : "secure/server.key"
     })
-    http_server.listen(PORT)
+
+    https_server.listen(443)
     tornado.ioloop.IOLoop.instance().start()
-    #app = make_app()
-    #app.listen(PORT)
-    #tornado.ioloop.IOLoop.current().start()
