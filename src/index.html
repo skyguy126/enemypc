@@ -1,95 +1,234 @@
-<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd">
-<html>
+
+<!DOCTYPE html>
+<html lang="en">
 <head>
-<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
-<title>Kappa</title>
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <!-- The above 3 meta tags *must* come first in the head; any other head content must come *after* these tags -->
+    <meta name="description" content="">
+    <meta name="author" content="">
+    <link rel="icon" href="../../favicon.ico">
+
+    <title>Cover Template for Bootstrap</title>
+
+    <!-- Bootstrap core CSS -->
+    <link href="static/bootstrap/css/bootstrap.min.css" rel="stylesheet">
+
+    <!-- Custom styles for this template -->
+    <style>
+        /*
+        * Globals
+        */
+
+        /* Links */
+        a,
+        a:focus,
+        a:hover {
+            color: #fff;
+        }
+
+        /* Custom default button */
+        .btn-default,
+        .btn-default:hover,
+        .btn-default:focus {
+            color: #333;
+            text-shadow: none; /* Prevent inheritence from `body` */
+            background-color: #fff;
+            border: 1px solid #fff;
+        }
+
+
+        /*
+        * Base structure
+        */
+
+        html,
+        body {
+            height: 100%;
+            background-color: #333;
+        }
+
+        body {
+            color: #fff;
+            text-align: center;
+            text-shadow: 0 1px 3px rgba(0,0,0,.5);
+        }
+
+        /* Extra markup and styles for table-esque vertical and horizontal centering */
+        .site-wrapper {
+            display: table;
+            width: 100%;
+            height: 100%; /* For at least Firefox */
+            min-height: 100%;
+            -webkit-box-shadow: inset 0 0 100px rgba(0,0,0,.5);
+            box-shadow: inset 0 0 100px rgba(0,0,0,.5);
+        }
+
+        .site-wrapper-inner {
+            display: table-cell;
+            vertical-align: top;
+        }
+
+        .cover-container {
+            margin-right: auto;
+            margin-left: auto;
+        }
+
+        /* Padding for spacing */
+        .inner {
+            padding: 30px;
+        }
+
+
+        /*
+        * Header
+        */
+        .masthead-brand {
+            margin-top: 10px;
+            margin-bottom: 10px;
+        }
+
+        .masthead-nav > li {
+            display: inline-block;
+        }
+
+            .masthead-nav > li + li {
+                margin-left: 20px;
+            }
+
+            .masthead-nav > li > a {
+                padding-right: 0;
+                padding-left: 0;
+                font-size: 16px;
+                font-weight: bold;
+                color: #fff; /* IE8 proofing */
+                color: rgba(255,255,255,.75);
+                border-bottom: 2px solid transparent;
+            }
+
+                .masthead-nav > li > a:hover,
+                .masthead-nav > li > a:focus {
+                    background-color: transparent;
+                    border-bottom-color: #a9a9a9;
+                    border-bottom-color: rgba(255,255,255,.25);
+                }
+
+        .masthead-nav > .active > a,
+        .masthead-nav > .active > a:hover,
+        .masthead-nav > .active > a:focus {
+            color: #fff;
+            border-bottom-color: #fff;
+        }
+
+        @media (min-width: 768px) {
+            .masthead-brand {
+                float: left;
+            }
+
+            .masthead-nav {
+                float: right;
+            }
+        }
+
+
+        /*
+        * Cover
+        */
+
+        .cover {
+            padding: 0 20px;
+        }
+
+            .cover .btn-lg {
+                padding: 10px 20px;
+                font-weight: bold;
+            }
+
+
+        /*
+        * Footer
+        */
+
+        .mastfoot {
+            color: #999; /* IE8 proofing */
+            color: rgba(255,255,255,.5);
+        }
+
+
+        /*
+        * Affix and center
+        */
+
+        @media (min-width: 768px) {
+            /* Pull out the header and footer */
+            .masthead {
+                position: fixed;
+                top: 0;
+            }
+
+            .mastfoot {
+                position: fixed;
+                bottom: 0;
+            }
+            /* Start the vertical centering */
+            .site-wrapper-inner {
+                vertical-align: middle;
+            }
+            /* Handle the widths */
+            .masthead,
+            .mastfoot,
+            .cover-container {
+                width: 100%; /* Must be percentage or pixels for horizontal alignment */
+            }
+        }
+
+        @media (min-width: 992px) {
+            .masthead,
+            .mastfoot,
+            .cover-container {
+                width: 700px;
+            }
+        }
+    </style>
+
 </head>
 
-
 <body>
-<div id="header">
-<h1>CSGODROP</h1>
-</div>
+    <div class="site-wrapper">
+        <div class="site-wrapper-inner">
+            <div class="cover-container">
+                <div class="masthead clearfix">
+                    <div class="inner">
+                        <h3 class="masthead-brand">Cover</h3>
+                        <nav>
+                            <ul class="nav masthead-nav">
+                                <li class="active"><a href="#">Home</a></li>
+                                <li><a href="#">Features</a></li>
+                                <li><a href="#">Contact</a></li>
+                            </ul>
+                        </nav>
+                    </div>
+                </div>
 
-<div id="sidebar" class="sidebart">
-  <a href="javascript:void(0)" class="closebtn" onclick="closet()">×</a>
-  <a href="javascript:void(0)" onclick="deposit()">Deposit</a>
-  <a href="#">Withdraw</a>
-  <a href="#">About</a>
-</div>
-<span style="font-size:30px;cursor:pointer" onclick="opent()">☰</span>
+                <div class="inner cover">
+                    <h1 class="cover-heading">Welcome to EnemyPC</h1>
+                    <p class="lead">Sign in with Steam to contiinue.</p>
+                    <p class="lead">
+                        <a href="/oid/login">
+                            <img src="https://steamcommunity-a.akamaihd.net/public/images/signinthroughsteam/sits_02.png" alt="Login with Steam!">
+                        </a>
+                    </p>
+                </div>
+            </div>
+        </div>
+    </div>
 
-
-
-<style>
-@charset "utf-8";
-
-
-#header{
-	background-color: cyan;
-	height: 100px;
-	text-align: center;
-}
-h1{
-	position:relative;
-	top:30px;
-}
-
-.sidebart {
-	position: fixed;
-    height: 100%;
-    width: 0;
-    z-index: 1;
-    top: 0;
-    left: 0;
-    background-color: #111;
-    overflow-x: hidden;
-    transition: 0.5s;
-    padding-top: 60px;
-}
-
-.sidebart a {
-    padding: 8px 8px 8px 32px;
-    text-decoration: none;
-    font-size: 25px;
-    color: #818181;
-    display: block;
-    transition: 0.3s
-}
-
-.sidebart a:hover, .offcanvas a:focus{
-    color: #f1f1f1;
-}
-
-
-.closebtn {
-    position: absolute;
-    top: 0;
-    right: 25px;
-    font-size: 36px !important;
-    margin-left: 50px;
-}
-
-@media screen and (max-height: 450px) {
-  .sidebart {padding-top: 15px;}
-  .sidebart a {font-size: 18px;}
-}
-</style>
-
-<script>
-function opent() {
-    document.getElementById("sidebar").style.width = "250px";
-}
-
-function closet() {
-    document.getElementById("sidebar").style.width = "0";
-}
-function deposit() {
-}
-	
-</script>
-     
+    <!-- Bootstrap core JavaScript
+    ================================================== -->
+    <!-- Placed at the end of the document so the pages load faster -->
+    <script src="https://ajax.googleapis.com/ajax/libs/jquery/1.11.3/jquery.min.js"></script>
+    <script>window.jQuery || document.write('<script src="../../assets/js/vendor/jquery.min.js"><\/script>')</script>
+    <script src="static/bootstrap/js/bootstrap.min.js"></script>
 </body>
-</html> 
-
-
+</html>
