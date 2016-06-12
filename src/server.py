@@ -1,11 +1,11 @@
-import tornado.ioloop
-import tornado.web
-import tornado.template
-import signal, os.path, steamapi, urllib, requests, json
+import tornado.ioloop, tornado.template, tornado.web, tornado.httpserver
+import signal, os.path, steamapi, urllib, requests, json, re
 
 PORT = 9999
 
 STEAM_API_KEY = ""
+
+COOKIE_SECRET = ""
 
 settings = {
     "static_path": os.path.join(os.path.dirname(__file__), "static"),
@@ -14,7 +14,6 @@ settings = {
 class MainHandler(tornado.web.RequestHandler):
 
     def get(self):
-        print "get req from: " + str(self.request.remote_ip)
         self.set_header("Content-type","text/html")
         self.render("index.html")
 
@@ -61,21 +60,18 @@ class OidAuthHandler(tornado.web.RequestHandler):
             "openid.return_to" : self.get_argument("openid.return_to"),
             "openid.response_nonce" : self.get_argument("openid.response_nonce")
         }
+        steam64id = params["openid.identity"][36:]
         r = requests.post("https://steamcommunity.com/openid/login", params=params)
-        if r.status_code == 200:
+        if r.status_code == 200 and len(steam64id) == 17:
             for val in r.text.strip('\n').split('\n'):
                 if val.split(':')[0] == "is_valid":
                     if val.split(':')[1] == "true":
+                        self.set_secure_cookie("session", steam64id, expires_days=None)
                         self.redirect("/home")
                     else:
-                        self.redirect("/oid/fail")
+                        self.redirect("/")
         else:
-            print "auth request failed"
-
-class OidFailHandler(tornado.web.RequestHandler):
-
-    def get(self):
-        pass
+            self.redirect("/")
 
 def make_app():
     return tornado.web.Application([
@@ -83,16 +79,26 @@ def make_app():
         (r"/search", SearchHandler),
         (r"/oid/login", OidLoginHandler),
         (r"/oid/auth", OidAuthHandler),
-        (r"/oid/fail", OidFailHandler),
         (r"/home", HomeHandler),
-    ], **settings)
+    ], cookie_secret=COOKIE_SECRET, **settings)
 
 if __name__ == "__main__":
-    print "Starting server on port " + str(PORT)
-    STEAM_API_KEY = raw_input("enter api key: ")
-    steamapi.core.APIConnection(api_key=STEAM_API_KEY)
+    print "Starting server on port: " + str(PORT)
 
+    with open("secure/apikey.txt", 'r') as f:
+        STEAM_API_KEY = f.read().strip('\n')
+    with open("secure/cookie_secret.txt", 'r') as f:
+        COOKIE_SECRET = f.read().strip('\n')
+
+    steamapi.core.APIConnection(api_key=STEAM_API_KEY)
     signal.signal(signal.SIGINT, signal.SIG_DFL)
-    app = make_app()
-    app.listen(PORT)
-    tornado.ioloop.IOLoop.current().start()
+
+    http_server = tornado.httpserver.HTTPServer(make_app(), ssl_options={
+        "certfile" : "secure/server.crt",
+        "keyfile" : "secure/server.key"
+    })
+    http_server.listen(PORT)
+    tornado.ioloop.IOLoop.instance().start()
+    #app = make_app()
+    #app.listen(PORT)
+    #tornado.ioloop.IOLoop.current().start()
