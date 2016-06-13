@@ -17,11 +17,15 @@ import (
 //prevent directory listing
 //implement crsf http://www.gorillatoolkit.org/pkg/csrf
 //https://gyazo.com/440cd2eaae0ad7a48e84604d356d73c4
+//implement routers (gorilla)
+//make jwt more secure
+//websocket implementation
 
 var COOKIE_SECRET string
 var STEAM_API_KEY string
 var STEAM_OID_LOGIN_URL string
 var INDEX_HTML string
+var HOME_HTML string
 
 func redirectToHttps(w http.ResponseWriter, r *http.Request) {
     http.Redirect(w, r, "https://24.4.237.252:443", http.StatusMovedPermanently)
@@ -47,7 +51,7 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 func homeHandler(w http.ResponseWriter, r *http.Request) {
     if r.Method == "GET" {
         log.Info("GET /home ", r.RemoteAddr)
-        fmt.Fprint(w, INDEX_HTML)
+        fmt.Fprint(w, HOME_HTML)
     }
 }
 
@@ -75,10 +79,17 @@ func oidAuthHandler(w http.ResponseWriter, r *http.Request) {
 
         log.Info("Authenticating login request from ", r.RemoteAddr, " with Steam...")
 
-        steam64id := params.Get("openid.identity")[36:54]
+        var steam64id string
+        if len(params.Get("openid.identity")) == 53 {
+            steam64id = params.Get("openid.identity")[36:53]
+        } else {
+            log.Error("Invalid steam64 ID returned for ", r.RemoteAddr, ", redirecting to home!")
+            http.Redirect(w, r, "https://24.4.237.252:443", http.StatusMovedPermanently)
+            return
+        }
 
         resp, err := http.PostForm("https://steamcommunity.com/openid/login", params)
-        if err != nil || len(steam64id) != 17 {
+        if err != nil {
             log.Error("Auth request for ", r.RemoteAddr, " failed, redirecting to home!")
             http.Redirect(w, r, "https://24.4.237.252:443", http.StatusMovedPermanently)
             return
@@ -119,7 +130,7 @@ func oidAuthHandler(w http.ResponseWriter, r *http.Request) {
             http.Redirect(w, r, "https://24.4.237.252:443/home", http.StatusMovedPermanently)
 
         } else {
-            log.Info("Addr ", r.RemoteAddr, " auth fail, redirecting to home!")
+            log.Warn("Addr ", r.RemoteAddr, " auth fail, redirecting to home!")
             http.Redirect(w, r, "https://24.4.237.252:443", http.StatusMovedPermanently)
             return
         }
@@ -136,7 +147,7 @@ func main() {
         return
     }
     STEAM_API_KEY = strings.Trim(string(apiKey), "\n ")
-    log.Info("Loaded API key: ", STEAM_API_KEY)
+    log.Info("Loaded API key")
 
     cookieSecret, cookieSecretError := ioutil.ReadFile("secure/cookie_secret.txt")
     if cookieSecretError != nil {
@@ -144,7 +155,7 @@ func main() {
         return
     }
     COOKIE_SECRET = strings.Trim(string(cookieSecret), "\n ")
-    log.Info("Loaded jwt cookie secret: ", COOKIE_SECRET)
+    log.Info("Loaded jwt cookie secret")
 
     indexHtmlFile, indexHtmlFileError := ioutil.ReadFile("index.html")
     if indexHtmlFileError != nil {
@@ -153,6 +164,14 @@ func main() {
     }
     INDEX_HTML = strings.Trim(string(indexHtmlFile), "\n ")
     log.Info("Loaded index.html")
+
+    homeHtmlFile, homeHtmlFileError := ioutil.ReadFile("home.html")
+    if homeHtmlFileError != nil {
+        log.Fatal("Error loading index.html: ", homeHtmlFileError.Error())
+        return
+    }
+    HOME_HTML = strings.Trim(string(homeHtmlFile), "\n ")
+    log.Info("Loaded home.html")
 
     params := url.Values{}
     params.Add("openid.ns", "http://specs.openid.net/auth/2.0")
