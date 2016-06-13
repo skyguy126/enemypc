@@ -1,3 +1,5 @@
 #secure files
 /src/secure/*
+/pkg/*
+/src/github.com/*
 
