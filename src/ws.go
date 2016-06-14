@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	log "github.com/Sirupsen/logrus"
 	jwt "github.com/dgrijalva/jwt-go"
+	sessions "github.com/gorilla/sessions"
 	websocket "github.com/gorilla/websocket"
 	"io/ioutil"
 	"net/http"
@@ -20,11 +22,10 @@ import (
 //implement crsf http://www.gorillatoolkit.org/pkg/csrf
 //https://gyazo.com/440cd2eaae0ad7a48e84604d356d73c4
 //implement routers (gorilla)
-//websocket implementation
-//null bytes
 //websocket read limit
 //session cookie
 
+//Make sure to use https port in HOST_ADDR
 const HOST_ADDR string = "24.4.237.252:443"
 const HOST_HTTP_PORT string = ":80"
 const HOST_HTTPS_PORT string = ":443"
@@ -35,6 +36,8 @@ var STEAM_OID_LOGIN_URL string
 var INDEX_HTML string
 var HOME_HTML string
 
+
+var sessionStore *sessions.CookieStore
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
@@ -76,18 +79,30 @@ func sockHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	msgType, data, readErr := conn.ReadMessage()
-	if readErr != nil {
+	//TODO place this somewhere less destructive
+	//defer conn.Close()
+
+	_, data, readErr := conn.ReadMessage()
+	if readErr != nil && strings.Compare(string(data), "") != 0 {
 		log.Error("Socket read (auth token) error from, ", conn.RemoteAddr, ": ", readErr.Error())
 		return
 	}
-
-	fmt.Printf("type %T\n", data)
-	fmt.Println(string(data))
-	fmt.Println(string(conn.RemoteAddr().String()))
-	fmt.Println(string(msgType))
-
+	cookieStr := strings.Split(string(bytes.Trim(data, "\x00")), "=")[1]
+	fmt.Println(cookieStr)
 	/*
+	token, err := jwt.Parse(cookieStr, func(token *jwt.Token) (interface{}, error) {
+        // Don't forget to validate the alg is what you expect:
+        if _, ok := token.Method(jwt.SigningMethodHS256); !ok {
+            return nil, fmt.Errorf("Unexpected signing method: %v", token.Header["alg"])
+        }
+        return token, nil
+    })
+
+	if err == nil && token.Valid {
+        fmt.Println("token valid")
+    }
+
+
 	for {
 		messageType, p, err := conn.ReadMessage()
 		if err != nil {
@@ -128,7 +143,7 @@ func oidAuthHandler(w http.ResponseWriter, r *http.Request) {
 
 		var steam64id string
 		if len(params.Get("openid.identity")) == 53 {
-			steam64id = params.Get("openid.identity")[36:53]
+			steam64id = string(bytes.Trim([]byte(params.Get("openid.identity")), "\x00"))[36:53]
 			match, regErr := regexp.MatchString("[0-9]", steam64id)
 			if match == false {
 				log.Warn("Invalid (non-numeric) steam64 ID returned for ", r.RemoteAddr, ", redirecting to /")
@@ -221,6 +236,14 @@ func main() {
 	}
 	COOKIE_SECRET = strings.Trim(string(cookieSecret), "\n ")
 	log.Info("Loaded jwt cookie secret")
+
+	sessionSecret, sessionSecretError := ioutil.ReadFile("secure/session_secret.txt")
+	if sessionSecretError != nil {
+		log.Fatal("Error loading session secret: ", sessionSecretError.Error())
+		return
+	}
+	sessionStore = sessions.NewCookieStore(sessionSecret)
+	log.Info("Loaded session secret")
 
 	indexHtmlFile, indexHtmlFileError := ioutil.ReadFile("index.html")
 	if indexHtmlFileError != nil {
