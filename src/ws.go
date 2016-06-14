@@ -26,6 +26,8 @@ import (
 //session cookie
 
 const HOST_ADDR string = "24.4.237.252:443"
+const HOST_HTTP_PORT string = ":80"
+const HOST_HTTPS_PORT string = ":443"
 
 var COOKIE_SECRET string
 var STEAM_API_KEY string
@@ -255,6 +257,6 @@ func main() {
 	http.HandleFunc("/oid/auth", oidAuthHandler)
 
 	http.Handle("/static/", http.StripPrefix("/static/", noDirListing(http.FileServer(http.Dir("./static")))))
-	go http.ListenAndServeTLS(":443", "secure/server.crt", "secure/server.key", nil)
-	http.ListenAndServe(":80", http.HandlerFunc(redirectToHttps))
+	go http.ListenAndServeTLS(HOST_HTTPS_PORT, "secure/server.crt", "secure/server.key", nil)
+	http.ListenAndServe(HOST_HTTP_PORT, http.HandlerFunc(redirectToHttps))
 }
