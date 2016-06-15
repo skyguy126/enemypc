@@ -5,7 +5,12 @@
 var config = {
  username: "",
  password: "",
- admin: '76561198021306496'
+ sharedsecret : "",
+ identitySecret : "",
+ itemList : [""],
+ statuskek : '',
+ tradeID : '',
+ admin: ''
 };
 
 module.exports = config;
