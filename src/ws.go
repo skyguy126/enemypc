@@ -3,16 +3,20 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"encoding/json"
 	log "github.com/Sirupsen/logrus"
 	jwt "github.com/dgrijalva/jwt-go"
+	mux "github.com/gorilla/mux"
 	sessions "github.com/gorilla/sessions"
 	websocket "github.com/gorilla/websocket"
+	alice "github.com/justinas/alice"
 	"io/ioutil"
 	"net/http"
 	"net/url"
 	"os"
 	"regexp"
 	"strings"
+	"strconv"
 	"time"
 )
 
@@ -21,17 +25,26 @@ import (
 //prevent directory listing
 //implement crsf http://www.gorillatoolkit.org/pkg/csrf
 //https://gyazo.com/440cd2eaae0ad7a48e84604d356d73c4
-//implement routers (gorilla)
+//implement routers http://www.gorillatoolkit.org/pkg/mux
 //websocket read limit
 //session cookie
 //null byte trimming
 //check content length and deny unreasonably large requests
+//middleware
+//rate limiting
+//get username picture... send thru websocket
+//try and switch token to ECDSA crypto
 
 //Make sure to use https port in HOST_ADDR
 const HOST_ADDR string = "24.4.237.252:443"
 const HOST_HTTP_PORT string = ":80"
 const HOST_HTTPS_PORT string = ":443"
 
+//token valid is seconds, session valid is days
+const TOKE_VALID_TIME = 30
+const SESS_VALID_TIME = 3
+
+//DO NOT EDIT THESE
 var COOKIE_SECRET string
 var STEAM_API_KEY string
 var STEAM_OID_LOGIN_URL string
@@ -44,202 +57,232 @@ var upgrader = websocket.Upgrader{
 	WriteBufferSize: 1024,
 }
 
-func redirectToHttps(w http.ResponseWriter, r *http.Request) {
-	http.Redirect(w, r, "https://" + HOST_ADDR, http.StatusMovedPermanently)
+func MainHandler(w http.ResponseWriter, r *http.Request) {
+	fmt.Fprint(w, INDEX_HTML)
 }
 
-func noDirListing(h http.Handler) http.HandlerFunc {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/") {
-			http.NotFound(w, r)
-			return
-		}
-		h.ServeHTTP(w, r)
-	})
+func HomeHandler(w http.ResponseWriter, r *http.Request) {
+	fmt.Fprint(w, HOME_HTML)
 }
 
-func mainHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method == "GET" {
-		log.Info("GET / ", r.RemoteAddr)
-		fmt.Fprint(w, INDEX_HTML)
-	}
-}
-
-func homeHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method == "GET" {
-		log.Info("GET /home ", r.RemoteAddr)
-		fmt.Fprint(w, HOME_HTML)
-	}
-}
-
-func sockHandler(w http.ResponseWriter, r *http.Request) {
+func SockHandler(w http.ResponseWriter, r *http.Request) {
 	var checkHCon bool = false
 	var checkHUp bool = false
 
 	if len(r.Header["Connection"]) == 1 && len(r.Header["Upgrade"]) == 1 {
-		checkHCon = strings.Compare(string(bytes.Trim([]byte(r.Header["Connection"][0]), "\x00")), "Upgrade") == 0
-		checkHUp = strings.Compare(string(bytes.Trim([]byte(r.Header["Upgrade"][0]), "\x00")), "websocket") == 0
+		checkHCon = strings.Compare(TrimNullBytes(r.Header["Connection"][0]), "Upgrade") == 0
+		checkHUp = strings.Compare(TrimNullBytes(r.Header["Upgrade"][0]), "websocket") == 0
 	}
 
 	if !checkHCon || !checkHUp {
 		log.Error("Invalid request to /sock from ", r.RemoteAddr, ", redirecting to /")
-		http.Redirect(w, r, "https://" + HOST_ADDR, http.StatusMovedPermanently)
+		http.Redirect(w, r, "https://"+HOST_ADDR, http.StatusMovedPermanently)
 		return
 	}
 
 	conn, connErr := upgrader.Upgrade(w, r, nil)
 	if connErr != nil {
 		log.Error("Websocket upgrade error for ", r.RemoteAddr, ": ", connErr.Error())
-		http.Redirect(w, r, "https://" + HOST_ADDR, http.StatusMovedPermanently)
+		http.Redirect(w, r, "https://"+HOST_ADDR, http.StatusMovedPermanently)
 		return
 	}
 	log.Info("Websocket connected from ", r.RemoteAddr)
 
-	//TODO place this somewhere less destructive
-	//defer conn.Close()
 	//TODO socket readlimits
-
 	_, data, readErr := conn.ReadMessage()
 	if readErr != nil || strings.Contains(string(data), "=") == false {
 		log.Error("Socket read (auth token) error from, ", conn.RemoteAddr, ": ", readErr.Error())
+		conn.Close()
 		return
 	}
 	cookieStr := strings.Split(string(bytes.Trim(data, "\x00")), "=")[1]
 
-	fmt.Println(cookieStr)
-
-	/*
-	token, _ := jwt.Parse(cookieStr, func(token *jwt.Token) ([]byte, error) {
-			return []byte(COOKIE_SECRET), nil
-	})
-	fmt.Printf("%T\n", token)
-	fmt.Println("state:", token.Valid)
-
-	for {
-		messageType, p, err := conn.ReadMessage()
-		if err != nil {
-			return
+	//TODO make this easier to read
+	token, tokenErr := jwt.Parse(cookieStr, func(token *jwt.Token) (interface{}, error) {
+		//validate algorithm used to sign
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("Invalid signing method: ", token.Header["alg"])
 		}
-		if err = conn.WriteMessage(messageType, p); err != nil {
-			return
+		return []byte(COOKIE_SECRET), nil
+	})
+
+	if tokenErr != nil {
+		log.Error("Error validating token from, ", conn.RemoteAddr, ": ", tokenErr.Error())
+		conn.Close()
+		return
+	}
+
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok || !token.Valid {
+		log.Warn("Invalid token from ", conn.RemoteAddr)
+		conn.Close()
+		return
+	}
+
+	expTime, _ := strconv.ParseInt(claims["exp"].(string), 10, 64)
+	remAddr, _ := claims["ip"].(string)
+	steam64id, _ := claims["sid"].(string)
+
+	expBool := expTime <= time.Now().Unix()
+	remAddrBool := strings.Compare(remAddr, strings.Split(conn.RemoteAddr().String(), ":")[0]) != 0
+	if expBool || remAddrBool {
+		switch {
+			case expBool:
+				log.Warn("Expired token from ", conn.RemoteAddr)
+			case remAddrBool:
+				log.Warn("Token ip addr mismatch: ", conn.RemoteAddr)
+			default:
+				conn.Close()
+				return
 		}
 	}
+
+	params := url.Values{}
+	params.Add("key", STEAM_API_KEY)
+	params.Add("steamids", steam64id)
+	resp, _ := http.Get("http://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/?" + params.Encode())
+	apiData, _ := ioutil.ReadAll(resp.Body)
+	fmt.Println(string(apiData))
+	/*
+		token, _ := jwt.Parse(cookieStr, func(token *jwt.Token) ([]byte, error) {
+				return []byte(COOKIE_SECRET), nil
+		})
+		fmt.Printf("%T\n", token)
+		fmt.Println("state:", token.Valid)
+
+		for {
+			messageType, p, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			if err = conn.WriteMessage(messageType, p); err != nil {
+				return
+			}
+		}
 	*/
 }
 
-func oidLoginHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method == "GET" {
-		log.Info("GET /oid/login ", r.RemoteAddr, " redirecting to Steam login...")
-		http.Redirect(w, r, STEAM_OID_LOGIN_URL, http.StatusMovedPermanently)
+func OidHandler(w http.ResponseWriter, r *http.Request) {
+	mode := TrimNullBytes(mux.Vars(r)["mode"])
+	if mode == "login" {
+		OidLoginHandler(w, r)
+	} else if mode == "auth" {
+		OidAuthHandler(w, r)
+	} else {
+		log.Warn("Invalid oid mode from ", r.RemoteAddr, ", redirecting to /")
+		http.Redirect(w, r, "https://"+HOST_ADDR, http.StatusMovedPermanently)
+		return
 	}
 }
 
-func oidAuthHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method == "GET" {
-		log.Info("GET /oid/auth ", r.RemoteAddr)
+func OidLoginHandler(w http.ResponseWriter, r *http.Request) {
+	http.Redirect(w, r, STEAM_OID_LOGIN_URL, http.StatusMovedPermanently)
+}
 
-		r.ParseForm()
-		params := url.Values{}
-		params.Add("openid.assoc_handle", r.Form.Get("openid.assoc_handle"))
-		params.Add("openid.signed", r.Form.Get("openid.signed"))
-		params.Add("openid.sig", r.Form.Get("openid.sig"))
-		params.Add("openid.ns", "http://specs.openid.net/auth/2.0")
-		params.Add("openid.mode", "check_authentication")
-		params.Add("openid.op_endpoint", r.Form.Get("openid.op_endpoint"))
-		params.Add("openid.claimed_id", r.Form.Get("openid.claimed_id"))
-		params.Add("openid.identity", r.Form.Get("openid.identity"))
-		params.Add("openid.return_to", r.Form.Get("openid.return_to"))
-		params.Add("openid.response_nonce", r.Form.Get("openid.response_nonce"))
+func OidAuthHandler(w http.ResponseWriter, r *http.Request) {
+	r.ParseForm()
+	params := url.Values{}
+	params.Add("openid.assoc_handle", r.Form.Get("openid.assoc_handle"))
+	params.Add("openid.signed", r.Form.Get("openid.signed"))
+	params.Add("openid.sig", r.Form.Get("openid.sig"))
+	params.Add("openid.ns", "http://specs.openid.net/auth/2.0")
+	params.Add("openid.mode", "check_authentication")
+	params.Add("openid.op_endpoint", r.Form.Get("openid.op_endpoint"))
+	params.Add("openid.claimed_id", r.Form.Get("openid.claimed_id"))
+	params.Add("openid.identity", r.Form.Get("openid.identity"))
+	params.Add("openid.return_to", r.Form.Get("openid.return_to"))
+	params.Add("openid.response_nonce", r.Form.Get("openid.response_nonce"))
 
-		log.Info("Authenticating login request from ", r.RemoteAddr, " with Steam...")
+	log.Info("Authenticating login request from ", r.RemoteAddr, " with Steam...")
 
-		var steam64id string
-		if len(params.Get("openid.identity")) == 53 {
-			steam64id = string(bytes.Trim([]byte(params.Get("openid.identity")), "\x00"))[36:53]
-			match, regErr := regexp.MatchString("[0-9]", steam64id)
-			if match == false {
-				log.Warn("Invalid (non-numeric) steam64 ID returned for ", r.RemoteAddr, ", redirecting to /")
-				http.Redirect(w, r, "https://" + HOST_ADDR, http.StatusMovedPermanently)
-				return
-			} else if regErr != nil {
-				log.Error("Regex error on steam64 ID for ", r.RemoteAddr, ", redirecting to /")
-				http.Redirect(w, r, "https://" + HOST_ADDR, http.StatusMovedPermanently)
-				return
-			}
-		} else {
-			log.Warn("Invalid (invalid length) steam64 ID returned for ", r.RemoteAddr, ", redirecting to /")
-			http.Redirect(w, r, "https://" + HOST_ADDR, http.StatusMovedPermanently)
+	var steam64id string
+	if len(params.Get("openid.identity")) == 53 {
+		steam64id = TrimNullBytes(params.Get("openid.identity"))[36:53]
+		match, regErr := regexp.MatchString("[0-9]", steam64id)
+		if match == false {
+			log.Warn("Invalid (non-numeric) steam64 ID returned for ", r.RemoteAddr, ", redirecting to /")
+			http.Redirect(w, r, "https://"+HOST_ADDR, http.StatusMovedPermanently)
+			return
+		} else if regErr != nil {
+			log.Error("Regex error on steam64 ID for ", r.RemoteAddr, ", redirecting to /")
+			http.Redirect(w, r, "https://"+HOST_ADDR, http.StatusMovedPermanently)
+			return
+		}
+	} else {
+		log.Warn("Invalid (invalid length) steam64 ID returned for ", r.RemoteAddr, ", redirecting to /")
+		http.Redirect(w, r, "https://"+HOST_ADDR, http.StatusMovedPermanently)
+		return
+	}
+
+	resp, err := http.PostForm("https://steamcommunity.com/openid/login", params)
+	if err != nil {
+		log.Error("Auth request for ", r.RemoteAddr, " failed, redirecting to /")
+		http.Redirect(w, r, "https://"+HOST_ADDR, http.StatusMovedPermanently)
+		return
+	}
+	defer resp.Body.Close()
+	data, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		log.Error("Read auth response for ", r.RemoteAddr, " failed, redirecting to /")
+		http.Redirect(w, r, "https://"+HOST_ADDR, http.StatusMovedPermanently)
+		return
+	}
+
+	is_valid := strings.Split(strings.Split(strings.Trim(string(data), "\n"), "\n")[1], ":")[1]
+	if strings.Compare(is_valid, "true") == 0 {
+		log.Info("Addr ", r.RemoteAddr, " has been authenticated")
+
+		session, sessionErr := sessionStore.Get(r, "session")
+		if sessionErr != nil {
+			log.Error("Error getting session for ", r.RemoteAddr, ": ", sessionErr.Error())
+		}
+
+		session.Options = &sessions.Options{
+			Path:     "/",
+			HttpOnly: true,
+			MaxAge:   86400 * SESS_VALID_TIME,
+			Secure:   true,
+		}
+
+		session.Values["sid"] = steam64id
+		session.Values["exp"] = string(time.Now().Add(time.Hour * 24 * SESS_VALID_TIME).Unix())
+		session.Values["ip"] = strings.Split(r.RemoteAddr, ":")[1]
+
+		//TODO add expire field and check
+		saveErr := session.Save(r, w)
+		if saveErr != nil {
+			log.Error("Error saving session for ", r.RemoteAddr, ": ", saveErr.Error(), " redirecting to /")
+			http.Redirect(w, r, "https://"+HOST_ADDR, http.StatusMovedPermanently)
 			return
 		}
 
-		resp, err := http.PostForm("https://steamcommunity.com/openid/login", params)
-		if err != nil {
-			log.Error("Auth request for ", r.RemoteAddr, " failed, redirecting to /")
-			http.Redirect(w, r, "https://" + HOST_ADDR, http.StatusMovedPermanently)
-			return
-		}
-		defer resp.Body.Close()
-		data, err := ioutil.ReadAll(resp.Body)
-		if err != nil {
-			log.Error("Read auth response for ", r.RemoteAddr, " failed, redirecting to /")
-			http.Redirect(w, r, "https://" + HOST_ADDR, http.StatusMovedPermanently)
-			return
-		}
+		log.Info("Generated session cookie for ", r.RemoteAddr)
 
-		is_valid := strings.Split(strings.Split(strings.Trim(string(data), "\n"), "\n")[1], ":")[1]
-		if strings.Compare(is_valid, "true") == 0 {
-			log.Info("Addr ", r.RemoteAddr, " has been authenticated")
+		GenSockAuthCookie(w, r, steam64id)
 
-			session, sessionErr := sessionStore.Get(r, "session")
-			if sessionErr != nil {
-				log.Error("Error getting session for ", r.RemoteAddr, ": ", sessionErr.Error())
-			}
-
-			session.Options = &sessions.Options{
-				Path : "/",
-				HttpOnly : true,
-				MaxAge : 86400 * 3,
-				Secure : true,
-			}
-
-			session.Values["sid"] = steam64id
-			session.Values["ip"] = strings.Split(r.RemoteAddr, ":")[1]
-			session.Values["exp"] = string(time.Now().Add(time.Hour * 72).Unix())
-
-			//TODO add expire field and check
-			saveErr := session.Save(r, w)
-			if saveErr != nil {
-				log.Error("Error saving session for ", r.RemoteAddr, ": ", saveErr.Error(), " redirecting to /" )
-				http.Redirect(w, r, "https://" + HOST_ADDR, http.StatusMovedPermanently)
-				return
-			}
-
-			log.Info("Generated session cookie for ", r.RemoteAddr)
-
-			genSockAuthCookie(w, r, steam64id)
-
-			http.Redirect(w, r, "https://" + HOST_ADDR + "/home", http.StatusMovedPermanently)
-			return
-		} else {
-			log.Warn("Addr ", r.RemoteAddr, " auth fail, redirecting to /")
-			http.Redirect(w, r, "https://" + HOST_ADDR, http.StatusMovedPermanently)
-			return
-		}
+		http.Redirect(w, r, "https://"+HOST_ADDR+"/home", http.StatusMovedPermanently)
+		return
+	} else {
+		log.Warn("Addr ", r.RemoteAddr, " auth fail, redirecting to /")
+		http.Redirect(w, r, "https://"+HOST_ADDR, http.StatusMovedPermanently)
+		return
 	}
 }
 
-func genSockAuthCookie(w http.ResponseWriter, r *http.Request, steam64id string) {
-	token := jwt.New(jwt.SigningMethodHS256)
-	tokenExp := time.Now().Add(time.Second * 30)
+func GenSockAuthCookie(w http.ResponseWriter, r *http.Request, steam64id string) {
+	tokenExp := time.Now().Add(time.Second * TOKE_VALID_TIME)
 
-	token.Claims["sid"] = steam64id
-	token.Claims["exp"] = string(tokenExp.Unix())
-	token.Claims["adr"] = string(r.RemoteAddr)
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"sid" : steam64id,
+		"exp" : strconv.FormatInt(tokenExp.Unix(), 10),
+		"ip" : strings.Split(string(r.RemoteAddr), ":")[0],
+	})
+
 	tokenString, tokenErr := token.SignedString([]byte(COOKIE_SECRET))
 
 	if tokenErr != nil {
 		log.Error("Error generating token for ", r.RemoteAddr, ": ", tokenErr.Error())
-		http.Redirect(w, r, "https://" + HOST_ADDR, http.StatusMovedPermanently)
+		http.Redirect(w, r, "https://"+HOST_ADDR, http.StatusMovedPermanently)
 		return
 	}
 
@@ -254,6 +297,54 @@ func genSockAuthCookie(w http.ResponseWriter, r *http.Request, steam64id string)
 	http.SetCookie(w, cookie)
 
 	log.Info("Set jwt sock_auth cookie for ", r.RemoteAddr, ", redirecting to /home")
+}
+
+func TrimNullBytes(input string) string {
+	return string(bytes.Trim([]byte(input), "\x00"))
+}
+
+func RedirectToHttps(w http.ResponseWriter, r *http.Request) {
+	log.Info("Redirecting ", r.RemoteAddr, " to HTTPS /")
+	http.Redirect(w, r, "https://"+HOST_ADDR, http.StatusMovedPermanently)
+}
+
+func NoDirListing(h http.Handler) http.HandlerFunc {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/") {
+			http.NotFound(w, r)
+			return
+		}
+		h.ServeHTTP(w, r)
+	})
+}
+
+func NotFoundHandler(w http.ResponseWriter, r *http.Request) {
+	//TODO custom 404 page
+	fmt.Fprint(w, "replace with custom 404 page")
+}
+
+func RecoverHandler(next http.Handler) http.Handler {
+	fn := func(w http.ResponseWriter, r *http.Request) {
+		defer func(w http.ResponseWriter) {
+			err := recover()
+			if err != nil {
+				log.Error("Unexpected panic from ", r.RemoteAddr, ": ", err)
+				http.Error(w, http.StatusText(500), 500)
+			}
+		}(w)
+		next.ServeHTTP(w, r)
+	}
+	return http.HandlerFunc(fn)
+}
+
+//TODO do not log time for connections to /sock
+func LogHandler(next http.Handler) http.Handler {
+	fn := func(w http.ResponseWriter, r *http.Request) {
+		startTime := time.Now()
+		next.ServeHTTP(w, r)
+		log.Info(r.RemoteAddr, " ", r.Method, " ", r.URL.Path, " ", time.Now().Sub(startTime))
+	}
+	return http.HandlerFunc(fn)
 }
 
 func main() {
@@ -303,23 +394,28 @@ func main() {
 	params := url.Values{}
 	params.Add("openid.ns", "http://specs.openid.net/auth/2.0")
 	params.Add("openid.mode", "checkid_setup")
-	params.Add("openid.return_to", "https://" + HOST_ADDR + "/oid/auth")
-	params.Add("openid.realm", "https://" + HOST_ADDR)
+	params.Add("openid.return_to", "https://"+HOST_ADDR+"/oid/auth")
+	params.Add("openid.realm", "https://"+HOST_ADDR)
 	params.Add("openid.identity", "http://specs.openid.net/auth/2.0/identifier_select")
 	params.Add("openid.claimed_id", "http://specs.openid.net/auth/2.0/identifier_select")
 	STEAM_OID_LOGIN_URL = "https://steamcommunity.com/openid/login?" + params.Encode()
 
-	log.Info("Built Steam OpenID login url")
+	r := mux.NewRouter()
+	r.StrictSlash(true)
+	r.NotFoundHandler = http.HandlerFunc(NotFoundHandler)
+	chain := alice.New(RecoverHandler, LogHandler)
+
+	r.Handle("/", chain.ThenFunc(MainHandler)).Methods("GET")
+	r.Handle("/home", chain.ThenFunc(HomeHandler)).Methods("GET")
+	r.Handle("/sock", chain.ThenFunc(SockHandler)).Methods("GET")
+	r.Handle("/oid/{mode:[a-z]+}", chain.ThenFunc(OidHandler)).Methods("GET")
+	r.PathPrefix("/static/").Handler(http.StripPrefix("/static/", NoDirListing(http.FileServer(http.Dir("./static/")))))
+
+	http.Handle("/", r)
+
 	log.Info("Starting servers...")
 
-	http.HandleFunc("/", mainHandler)
-	http.HandleFunc("/home", homeHandler)
-	http.HandleFunc("/sock", sockHandler)
-	http.HandleFunc("/oid/login", oidLoginHandler)
-	http.HandleFunc("/oid/auth", oidAuthHandler)
-	http.HandleFunc("/oid/logout", oidAuthHandler)
-
-	http.Handle("/static/", http.StripPrefix("/static/", noDirListing(http.FileServer(http.Dir("./static")))))
+	//TODO catch error
 	go http.ListenAndServeTLS(HOST_HTTPS_PORT, "secure/server.crt", "secure/server.key", nil)
-	http.ListenAndServe(HOST_HTTP_PORT, http.HandlerFunc(redirectToHttps))
+	http.ListenAndServe(HOST_HTTP_PORT, http.HandlerFunc(RedirectToHttps))
 }
