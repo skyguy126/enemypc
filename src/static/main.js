@@ -22,7 +22,7 @@ $(function () {
 
     function onMessage(evt)
     {
-        console.log(evt.data)
+        console.log("msg socket")
     }
 
     function onError(evt)
