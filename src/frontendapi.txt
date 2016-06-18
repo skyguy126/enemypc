@@ -1,0 +1,37 @@
+When user enters /home, websocket will try and connect to /sock
+Make sure it is WSS over HTTPS
+ex. wss://24.4.237.252/sock
+
+As soon as connection is established send the sock_auth cookie over socket.
+This must be the first message sent or else server will close socket.
+
+Play a loading animation over the fields that need to be populated
+ex. User picture, user nickname
+TBD ^^ (for now just use the ones listed above)
+
+The server will validate the token and send a response.
+This will be the first message the client receives from the server.
+
+If there is an error while connecting or a server-side read error,
+no messages will be sent and the socket will be closed.
+
+If the token is valid server will send
+{"is_valid":"true"}
+if not
+{"is_valid":"false"}
+
+JSON is of type string:string
+
+If received is_valid == false, display error message (red ! mark would work)
+where the loading animation originally played and perform any necessary
+onClose actions.
+
+*The server will automatically close the connection if is_valid == false*
+**server may close connection at any time due to internal errors, be prepared for this**
+
+Once server gathers user data from steamapi it will send response as follows
+{"avatar":URL_TO_AVATAR,"nickname":"7 Day Cooldowns"}
+
+End loading animation and display username and avatar
+
+*make sure sockets do not timeout client-side during operation*
