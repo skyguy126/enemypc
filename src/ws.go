@@ -2,12 +2,12 @@ package main
 
 import (
 	"bytes"
-	"fmt"
 	"encoding/json"
+	"fmt"
 	log "github.com/Sirupsen/logrus"
+	jason "github.com/antonholmquist/jason"
 	jwt "github.com/dgrijalva/jwt-go"
 	mux "github.com/gorilla/mux"
-	jason "github.com/antonholmquist/jason"
 	sessions "github.com/gorilla/sessions"
 	websocket "github.com/gorilla/websocket"
 	alice "github.com/justinas/alice"
@@ -16,8 +16,8 @@ import (
 	"net/url"
 	"os"
 	"regexp"
-	"strings"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -35,17 +35,17 @@ import (
 //make sure jwt token is only one time use
 //socket timeouts
 //status codes for websocket
+//prevent multiple connections from same ip
+//set ulimit
 
 //Make sure to use https port in HOST_ADDR
 const HOST_ADDR string = "24.4.237.252:443"
 const HOST_HTTP_PORT string = ":80"
 const HOST_HTTPS_PORT string = ":443"
 
-//token valid is seconds, session valid is days
-const TOKEN_VALID_TIME = 20
-const SESS_VALID_TIME = 3
+const TOKEN_VALID_TIME = 30
+const SESS_VALID_TIME = 86400 * 3
 
-//DO NOT EDIT THESE
 var COOKIE_SECRET string
 var STEAM_API_KEY string
 var INDEX_HTML string
@@ -55,8 +55,8 @@ var steamApiUrl string = "http://api.steampowered.com/ISteamUser/GetPlayerSummar
 var sessionStore *sessions.CookieStore
 var upgrader = websocket.Upgrader{
 	HandshakeTimeout: time.Second * 15,
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
+	ReadBufferSize:   1024,
+	WriteBufferSize:  1024,
 }
 
 func MainHandler(w http.ResponseWriter, r *http.Request) {
@@ -69,7 +69,17 @@ func HomeHandler(w http.ResponseWriter, r *http.Request) {
 	session, sessionErr := sessionStore.Get(r, "session")
 	if sessionErr != nil {
 		log.Error("Error getting session for ", r.RemoteAddr, ": ", sessionErr.Error())
-		http.Redirect(w, r, "https://"+HOST_ADDR, http.StatusMovedPermanently)
+
+		http.SetCookie(w, &http.Cookie{
+			Name:     "session",
+			Value:    "default",
+			Expires:  time.Now(),
+			MaxAge:   -1,
+			HttpOnly: true,
+			Secure:   true,
+			Path:     "/",
+		})
+		log.Info("Requested removal of session cookie for ", r.RemoteAddr)
 	}
 
 	if !session.IsNew {
@@ -79,9 +89,9 @@ func HomeHandler(w http.ResponseWriter, r *http.Request) {
 		isDifferentIp := strings.Compare(remAddr, strings.Split(r.RemoteAddr, ":")[0]) != 0
 		//TODO make code better
 		if isExpired || isDifferentIp {
-			if isExpired {
+			if isDifferentIp {
 				log.Warn("Session ip addr mismatch: ", r.RemoteAddr, ", ", remAddr)
-			} else if isDifferentIp {
+			} else if isExpired {
 				log.Warn("Expired session from ", r.RemoteAddr)
 			}
 			http.Redirect(w, r, "https://"+HOST_ADDR+"/oid/login", http.StatusMovedPermanently)
@@ -135,7 +145,6 @@ func SockHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Info("Websocket connected from ", r.RemoteAddr)
 
-	//TODO this will only read 1024 bytes at a time, use headers
 	conn.SetReadLimit(2048)
 	messageType, data, readErr := conn.ReadMessage()
 	if readErr != nil || len(data) < 1 || strings.Contains(string(data), "=") == false {
@@ -150,6 +159,8 @@ func SockHandler(w http.ResponseWriter, r *http.Request) {
 
 	cookieStr := strings.Split(string(bytes.Trim(data, "\x00")), "=")[1]
 
+	//TODO add token to redis and make sure it can only be used once
+
 	token, tokenErr := jwt.Parse(cookieStr, func(token *jwt.Token) (interface{}, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, fmt.Errorf("Invalid signing method: ", token.Header["alg"])
@@ -159,7 +170,7 @@ func SockHandler(w http.ResponseWriter, r *http.Request) {
 
 	if tokenErr != nil {
 		log.Error("Error validating token from, ", conn.RemoteAddr().String(), ": ", tokenErr.Error())
-		MarshalAndSend(map[string]string{"is_valid":"false"}, conn, messageType)
+		MarshalAndSend(map[string]string{"is_valid": "false"}, conn, messageType)
 		conn.Close()
 		return
 	}
@@ -167,7 +178,7 @@ func SockHandler(w http.ResponseWriter, r *http.Request) {
 	claims, ok := token.Claims.(jwt.MapClaims)
 	if !ok || !token.Valid {
 		log.Warn("Invalid token from ", conn.RemoteAddr().String())
-		MarshalAndSend(map[string]string{"is_valid":"false"}, conn, messageType)
+		MarshalAndSend(map[string]string{"is_valid": "false"}, conn, messageType)
 		conn.Close()
 		return
 	}
@@ -185,12 +196,12 @@ func SockHandler(w http.ResponseWriter, r *http.Request) {
 			log.Warn("Token ip addr mismatch: ", conn.RemoteAddr().String(), ", ", remAddr)
 		}
 
-		MarshalAndSend(map[string]string{"is_valid":"false"}, conn, messageType)
+		MarshalAndSend(map[string]string{"is_valid": "false"}, conn, messageType)
 		conn.Close()
 		return
 	}
 
-	if MarshalAndSend(map[string]string{"is_valid":"true"}, conn, messageType) != nil {
+	if MarshalAndSend(map[string]string{"is_valid": "true"}, conn, messageType) != nil {
 		conn.Close()
 		return
 	}
@@ -213,13 +224,15 @@ func SockHandler(w http.ResponseWriter, r *http.Request) {
 
 	log.Info("Token validated for ", conn.RemoteAddr().String())
 
+	//TODO check if user profile is private first
 	payload, _ := jason.NewObjectFromBytes(apiData)
 	allUserData, _ := payload.GetObjectArray("response", "players")
 	for _, key := range allUserData {
 		userNickname, _ := key.GetString("personaname")
 		userAvatar, _ := key.GetString("avatarfull")
-		userInfo := map[string]string{"nickname" : userNickname, "avatar" : userAvatar}
+		userInfo := map[string]string{"nickname": userNickname, "avatar": userAvatar}
 		if MarshalAndSend(userInfo, conn, messageType) != nil {
+			log.Error("Error sending userinfo to ", conn.RemoteAddr().String())
 			conn.Close()
 			return
 		}
@@ -248,11 +261,39 @@ func OidHandler(w http.ResponseWriter, r *http.Request) {
 		OidAuthHandler(w, r, false)
 	} else if mode == "auth_s" {
 		OidAuthHandler(w, r, true)
+	} else if mode == "logout" {
+		OidLogoutHandler(w, r)
 	} else {
 		log.Warn("Invalid oid mode from ", r.RemoteAddr, ", redirecting to /")
 		http.Redirect(w, r, "https://"+HOST_ADDR, http.StatusMovedPermanently)
 		return
 	}
+}
+
+//TODO remove sock_auth cookie as well
+func OidLogoutHandler(w http.ResponseWriter, r *http.Request) {
+	session, sessionErr := sessionStore.Get(r, "session")
+	if sessionErr != nil {
+		log.Error("Error getting session for ", r.RemoteAddr, ": ", sessionErr.Error())
+		http.Redirect(w, r, "https://"+HOST_ADDR, http.StatusMovedPermanently)
+	}
+	if !session.IsNew {
+		session.Options = &sessions.Options{
+			Path:     "/",
+			HttpOnly: true,
+			MaxAge:   -1,
+			Secure:   true,
+		}
+		if err := session.Save(r, w); err != nil {
+			log.Error("Error removing session for ", r.RemoteAddr, ": ", err.Error())
+			http.Redirect(w, r, "https://"+HOST_ADDR, http.StatusMovedPermanently)
+			return
+		}
+		log.Info("Requested removal of session for ", r.RemoteAddr)
+	}
+
+	log.Info("Logout sequence finished for ", r.RemoteAddr, " redirecting to /")
+	http.Redirect(w, r, "https://"+HOST_ADDR, http.StatusMovedPermanently)
 }
 
 func OidLoginHandler(w http.ResponseWriter, r *http.Request, saveSession bool) {
@@ -334,17 +375,16 @@ func OidAuthHandler(w http.ResponseWriter, r *http.Request, saveSession bool) {
 			session.Options = &sessions.Options{
 				Path:     "/",
 				HttpOnly: true,
-				MaxAge:   86400 * SESS_VALID_TIME,
+				MaxAge:   SESS_VALID_TIME,
 				Secure:   true,
 			}
 
 			session.Values["sid"] = steam64id
-			session.Values["exp"] = strconv.FormatInt(time.Now().Add(time.Hour * 24 * SESS_VALID_TIME).Unix(), 10)
+			session.Values["exp"] = strconv.FormatInt(time.Now().Unix()+SESS_VALID_TIME, 10)
 			session.Values["ip"] = strings.Split(r.RemoteAddr, ":")[0]
 
-			saveErr := session.Save(r, w)
-			if saveErr != nil {
-				log.Error("Error saving session for ", r.RemoteAddr, ": ", saveErr.Error(), " redirecting to /")
+			if err := session.Save(r, w); err != nil {
+				log.Error("Error saving session for ", r.RemoteAddr, ": ", err.Error(), " redirecting to /")
 				http.Redirect(w, r, "https://"+HOST_ADDR, http.StatusMovedPermanently)
 				return
 			}
@@ -370,10 +410,11 @@ func OidAuthHandler(w http.ResponseWriter, r *http.Request, saveSession bool) {
 func GenSockAuthCookie(w http.ResponseWriter, r *http.Request, steam64id string) error {
 	tokenExp := time.Now().Add(time.Second * TOKEN_VALID_TIME)
 
+	//TODO add mode field "websocket"
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"sid" : steam64id,
-		"exp" : strconv.FormatInt(tokenExp.Unix(), 10),
-		"ip" : strings.Split(string(r.RemoteAddr), ":")[0],
+		"sid": steam64id,
+		"exp": strconv.FormatInt(tokenExp.Unix(), 10),
+		"ip":  strings.Split(string(r.RemoteAddr), ":")[0],
 	})
 
 	tokenString, tokenErr := token.SignedString([]byte(COOKIE_SECRET))
@@ -432,12 +473,12 @@ func RecoverHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(fn)
 }
 
-//TODO do not log time for connections to /sock
 func LogHandler(next http.Handler) http.Handler {
 	fn := func(w http.ResponseWriter, r *http.Request) {
+		log.Info(r.RemoteAddr, " ", r.Method, " ", r.URL.Path)
 		startTime := time.Now()
 		next.ServeHTTP(w, r)
-		log.Info(r.RemoteAddr, " ", r.Method, " ", r.URL.Path, " ", time.Now().Sub(startTime))
+		log.Info(r.RemoteAddr, " ", r.Method, " ", r.URL.Path, " completed in ", time.Now().Sub(startTime))
 	}
 	return http.HandlerFunc(fn)
 }
@@ -468,7 +509,8 @@ func main() {
 		return
 	}
 	sessionStore = sessions.NewCookieStore(sessionSecret)
-	log.Info("Loaded session secret")
+	sessionStore.MaxAge(SESS_VALID_TIME)
+	log.Info("Loaded session store")
 
 	indexHtmlFile, indexHtmlFileError := ioutil.ReadFile("index.html")
 	if indexHtmlFileError != nil {
