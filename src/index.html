@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="utf-8">
@@ -132,10 +132,12 @@
                     <h1 class="cover-heading">Welcome to EnemyPC</h1>
                     <p class="lead">Sign in with Steam to continue.</p>
                     <p class="lead">
-                        <a href="/oid/login">
+                        <a id="loginLink" href="/oid/login">
                             <img src="https://steamcommunity-a.akamaihd.net/public/images/signinthroughsteam/sits_02.png" alt="Login with Steam!">
                         </a>
                     </p>
+                    <input type="checkbox" id="staySignedIn" name="staySignedIn" />
+                    <label class="lead" for="staySignedIn">Stay signed in</label>
                 </div>
             </div>
         </div>
@@ -145,7 +147,17 @@
     ================================================== -->
     <!-- Placed at the end of the document so the pages load faster -->
     <script src="https://ajax.googleapis.com/ajax/libs/jquery/1.11.3/jquery.min.js"></script>
-    <script>window.jQuery || document.write('<script src="../../assets/js/vendor/jquery.min.js"><\/script>')</script>
     <script src="static/bootstrap/js/bootstrap.min.js"></script>
+
+    <script>
+        $("#staySignedIn").change(function () {
+            if (this.checked) {
+                $("#loginLink").attr("href", "/oid/login_s");
+            }
+            else {
+                $("#loginLink").attr("href", "/oid/login");
+            }
+        })
+    </script>
 </body>
 </html>
