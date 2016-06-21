@@ -1,6 +1,6 @@
 /* main.js */
 
-$(function () {
+$(document).ready(function () {
     console.log("Ready!");
 
     socket = new WebSocket("wss://24.4.237.252:443/sock");
@@ -22,7 +22,7 @@ $(function () {
 
     function onMessage(evt)
     {
-        console.log("msg socket")
+        console.log(evt.data)
     }
 
     function onError(evt)

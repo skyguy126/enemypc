@@ -16,9 +16,9 @@ If there is an error while connecting or a server-side read error,
 no messages will be sent and the socket will be closed.
 
 If the token is valid server will send
-{"is_valid":"true"}
+{"is_valid":"true", "code":"0"}
 if not
-{"is_valid":"false"}
+{"is_valid":"false", "code":"0"}
 
 JSON is of type string:string
 
@@ -35,3 +35,9 @@ Once server gathers user data from steamapi it will send response as follows
 End loading animation and display username and avatar
 
 *make sure sockets do not timeout client-side during operation*
+
+Status codes:
+0 = token auth result (success or failure) {"code":"0","is_valid":"true"}
+1 = userdata (nickname and avatar) {"avatar":LINK TO AVATAR,"code":"1","nickname":"Anthony Larson"}
+2 = someone else logged in as this user, socket closed {"code": "2"}
+3 = chat message TODO TBD
