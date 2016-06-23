@@ -42,6 +42,7 @@ import (
 //prevent multiple connections from same ip
 //set ulimit
 //socket pinging so it doesnt auto close
+//socket timeouts
 
 //Make sure to use https port in HOST_ADDR
 const HOST_ADDR string = "24.4.237.252:443"
@@ -59,7 +60,7 @@ var HOME_HTML string
 var NOT_FOUND_HTML string
 
 var redis redigo.Conn
-var redisTokenChan chan *RedisToken = make(chan *RedisToken, 100)
+var redisChan chan *RedisToken = make(chan *RedisToken, 100)
 var broadcastChan chan *Broadcast = make(chan *Broadcast, 100)
 var steamApiUrl string = "https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/?"
 var sessionStore *sessions.CookieStore
@@ -87,11 +88,9 @@ type SocketConn struct {
 	Sid string
 	Conn *websocket.Conn
 	Callback chan int
-	ConnStatus int
+	ConnAlive bool
 	Sync *sync.Mutex
-	//TODO add mutex so only write loop or broadcast loop can write
-	//0 is active
-	//1 is marked for removal (dead)
+	KeepInDb bool
 }
 
 type Broadcast struct {
@@ -99,27 +98,24 @@ type Broadcast struct {
 	Conn *SocketConn
 	Code int
 	Callback chan *SocketConn
-	//0 add to slice
-	//1 proceed to delete
+	//0 add to array of active clients
+	//1 perform cleanup operation
 	//2 disable client with specified steamid
-	//3 broadcast message to all clients
+	//3 broadcast chat message to all clients
 }
 
 func MainHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-type", "text/html")
-
-	//TODO add redirection to /home if session exists
 	fmt.Fprint(w, INDEX_HTML)
 }
 
 func HomeHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-type", "text/html")
 
-	//TODO delete session if from new ip
 	session, sessionErr := sessionStore.Get(r, "session")
 	if sessionErr != nil {
 		log.Error("Error getting session for ", r.RemoteAddr, ": ", sessionErr.Error())
-		RemoveSessionCookie(session, w, r)
+		removeSessionCookie(session, w, r)
 	}
 
 	if !session.IsNew {
@@ -134,14 +130,14 @@ func HomeHandler(w http.ResponseWriter, r *http.Request) {
 			} else if isExpired {
 				log.Warn("Expired session from ", r.RemoteAddr)
 			}
-			RemoveSessionCookie(session, w, r)
+			removeSessionCookie(session, w, r)
 			http.Redirect(w, r, "https://"+HOST_ADDR+"/oid/login", http.StatusMovedPermanently)
 			return
 		}
 
 		log.Info("Logged in with session for ", r.RemoteAddr)
 
-		if GenSockAuthCookie(w, r, session.Values["sid"].(string)) != nil {
+		if genSockAuthCookie(w, r, session.Values["sid"].(string)) != nil {
 			http.Redirect(w, r, "https://"+HOST_ADDR, http.StatusMovedPermanently)
 			return
 		}
@@ -149,32 +145,45 @@ func HomeHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, HOME_HTML)
 }
 
-func MarshalAndSend(data map[string]string, conn *SocketConn, dataType int) error {
+func marshalAndSend(data map[string]string, socketConn *SocketConn, needLock bool) error {
 	json, jsonErr := json.Marshal(data)
 	if jsonErr != nil {
-		log.Error("Json marshal error for ", conn.Conn.RemoteAddr().String(), ": ", jsonErr.Error())
+		log.Error("Json marshal error for ", socketConn.Conn.RemoteAddr().String(), ": ", jsonErr.Error())
 		return jsonErr
 	}
-	conn.Sync.Lock()
-	sendErr := conn.Conn.WriteMessage(dataType, json)
-	conn.Sync.Unlock()
+
+	var sendErr error
+	if needLock {
+		socketConn.Sync.Lock()
+	}
+	if socketConn.ConnAlive {
+		//TODO catch error
+		socketConn.Conn.WriteMessage(1, json)
+	} else {
+		return nil
+	}
+	if needLock {
+		socketConn.Sync.Unlock()
+	}
+
 	if sendErr != nil {
-		log.Error("Error sending message to ", conn.Conn.RemoteAddr().String(), ": ", sendErr.Error())
+		//TODO add retry mechanism
+		log.Error("Error sending message to ", socketConn.Conn.RemoteAddr().String(), ": ", sendErr.Error())
+		if needLock {
+			socketConn.Sync.Lock()
+		}
+		socketConn.ConnAlive = false
+		if needLock {
+			socketConn.Sync.Unlock()
+		}
 		return sendErr
 	}
 	return nil
 }
 
 func SockHandler(w http.ResponseWriter, r *http.Request) {
-	var checkHCon bool = false
-	var checkHUp bool = false
 
-	if len(r.Header["Connection"]) == 1 && len(r.Header["Upgrade"]) == 1 {
-		checkHCon = strings.Compare(TrimNullBytes(r.Header["Connection"][0]), "Upgrade") == 0
-		checkHUp = strings.Compare(TrimNullBytes(r.Header["Upgrade"][0]), "websocket") == 0
-	}
-
-	if !checkHCon || !checkHUp {
+	if !websocket.IsWebSocketUpgrade(r) {
 		log.Warn("Invalid request to /sock from ", r.RemoteAddr, ", redirecting to /")
 		http.Redirect(w, r, "https://"+HOST_ADDR, http.StatusMovedPermanently)
 		return
@@ -186,16 +195,16 @@ func SockHandler(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "https://"+HOST_ADDR, http.StatusMovedPermanently)
 		return
 	}
-	log.Info("Websocket connected from ", r.RemoteAddr)
+	log.Info("Websocket connected from ", conn.RemoteAddr().String())
 
 	socketConn := &SocketConn{
 		Conn: conn,
-		ConnStatus : 0,
+		ConnAlive : true,
 		Sync : new(sync.Mutex),
 	}
 
 	conn.SetReadLimit(2048)
-	messageType, data, readErr := conn.ReadMessage()
+	_, data, readErr := conn.ReadMessage()
 	if readErr != nil || len(data) < 1 || strings.Contains(string(data), "=") == false {
 		if readErr != nil {
 			log.Error("Socket read (auth token) error from, ", conn.RemoteAddr().String(), ": ", readErr.Error())
@@ -217,15 +226,15 @@ func SockHandler(w http.ResponseWriter, r *http.Request) {
 
 	if tokenErr != nil {
 		log.Error("Error validating token from, ", conn.RemoteAddr().String(), ": ", tokenErr.Error())
-		MarshalAndSend(map[string]string{"is_valid": "false", "code":"0"}, socketConn, messageType)
+		marshalAndSend(map[string]string{"is_valid": "false", "code":"0"}, socketConn, true)
 		conn.Close()
 		return
 	}
 
 	claims, ok := token.Claims.(jwt.MapClaims)
 	if !ok || !token.Valid {
-		log.Warn("Invalid token from ", conn.RemoteAddr().String())
-		MarshalAndSend(map[string]string{"is_valid": "false", "code":"0"}, socketConn, messageType)
+		log.Error("Error asserting types or invalid token from ", conn.RemoteAddr().String())
+		marshalAndSend(map[string]string{"is_valid": "false", "code":"0"}, socketConn, true)
 		conn.Close()
 		return
 	}
@@ -242,48 +251,44 @@ func SockHandler(w http.ResponseWriter, r *http.Request) {
 		} else if isDifferentIp {
 			log.Warn("Token ip addr mismatch: ", conn.RemoteAddr().String(), ", ", remAddr)
 		}
-		MarshalAndSend(map[string]string{"is_valid": "false", "code":"0"}, socketConn, messageType)
+		marshalAndSend(map[string]string{"is_valid": "false", "code":"0"}, socketConn, true)
 		conn.Close()
 		return
 	}
 
-	//TODO add token to redis and make sure it can only be used once
-	//fix sending maps so they contain status codes
-	//1 database for steam ids - close one if another is trying to sign in
-	//make sure to close first connection by sending 2 before sending 0 to first
-	//1 databse for tokens, each lasts 30 seconds to make sure they are onetime use
-	//callback chan codes 0 = token success, 1 = token faulure, 2 = user connecting rip, 3 = conn close ack
 	callbackChan := make(chan int)
-	tokenStruct := &RedisToken{
+	redisChan <- &RedisToken{
 		Code : 0,
 		Token : cookieStr,
 		Sid : steam64id,
 		Callback : callbackChan,
 	}
-	redisTokenChan <- tokenStruct
 
 	if <-callbackChan == 1 {
 		log.Warn("Token from ", conn.RemoteAddr().String(), " has already been used")
-		MarshalAndSend(map[string]string{"is_valid": "false", "code":"0"}, socketConn, messageType)
+		marshalAndSend(map[string]string{"is_valid": "false", "code":"0"}, socketConn, true)
 		conn.Close()
 		return
 	}
 
-	if MarshalAndSend(map[string]string{"is_valid": "true", "code":"0"}, socketConn, messageType) != nil {
+	if marshalAndSend(map[string]string{"is_valid": "true", "code":"0"}, socketConn, true) != nil {
 		conn.Close()
 		return
 	}
+
+	log.Info("Token validated for ", conn.RemoteAddr().String())
 
 	socketConn.Sid = steam64id
 	socketConn.Callback = callbackChan
+	socketConn.KeepInDb = false
 
 	params := url.Values{}
 	params.Add("key", STEAM_API_KEY)
 	params.Add("steamids", steam64id)
-
 	resp, respErr := http.Get(steamApiUrl + params.Encode())
 	if readErr != nil {
 		log.Error("Error fetching userinfo with steam api ", conn.RemoteAddr().String(), ": ", respErr.Error())
+		marshalAndSend(map[string]string{"code":"4"}, socketConn, true)
 		conn.Close()
 		return
 	}
@@ -291,24 +296,34 @@ func SockHandler(w http.ResponseWriter, r *http.Request) {
 	apiData, readErr := ioutil.ReadAll(resp.Body)
 	if readErr != nil {
 		log.Error("Error reading response from steamapi for ", conn.RemoteAddr().String(), ": ", readErr.Error())
+		marshalAndSend(map[string]string{"code":"4"}, socketConn, true)
+		conn.Close()
+		return
 	}
 
-	log.Info("Token validated for ", conn.RemoteAddr().String())
-
-	//TODO check if user profile is private first
 	payload, _ := jason.NewObjectFromBytes(apiData)
 	allUserData, _ := payload.GetObjectArray("response", "players")
 	for _, key := range allUserData {
-		userNickname, _ := key.GetString("personaname")
-		userAvatar, _ := key.GetString("avatarfull")
-		userInfo := map[string]string{"nickname": userNickname, "avatar": userAvatar, "code": "1"}
-		if MarshalAndSend(userInfo, socketConn, messageType) != nil {
-			log.Error("Error sending userinfo to ", conn.RemoteAddr().String())
+		communityState, _ := key.GetInt64("communityvisibilitystate")
+		profileState, _ := key.GetInt64("profilestate")
+		if communityState == 3 && profileState == 1 {
+			userNickname, _ := key.GetString("personaname")
+			userAvatar, _ := key.GetString("avatarfull")
+			userInfo := map[string]string{"nickname": userNickname, "avatar": userAvatar, "code": "1"}
+			if marshalAndSend(userInfo, socketConn, true) != nil {
+				log.Error("Error sending userinfo to ", conn.RemoteAddr().String())
+				conn.Close()
+				return
+			}
+		} else {
+			log.Warn(conn.RemoteAddr().String(), " ", steam64id, " steam profile is private or not setup")
+			marshalAndSend(map[string]string{"code":"6"}, socketConn, true)
 			conn.Close()
 			return
 		}
 	}
 
+	//Add connection to broadcast loop
 	broadcastChan <- &Broadcast{
 		Conn : socketConn,
 		Code : 0,
@@ -316,28 +331,42 @@ func SockHandler(w http.ResponseWriter, r *http.Request) {
 
 	//status 0 = ok
 	//status 1 = quit
+	defer fmt.Println("main exit")
 	msgChan := make(chan *WebsocketMessage)
 	go socketReadLoop(socketConn, msgChan)
 	for {
 		select {
-			case state := <-callbackChan:
+		case state := <-socketConn.Callback:
+				//reasons
+				//0 keep in redis
+				//1 remove from redis
+
+				//0 token validated
+				//1 token invalid
+				//2 another user signed in as
+				//3 too many errors
 				if state == 2 {
-					log.Warn("Another user signed in as ", r.RemoteAddr)
-					if MarshalAndSend(map[string]string{"code": "2"}, socketConn, messageType) != nil {
-						log.Error("Sending status 2 failed")
-					}
-					socketConn.Sync.Lock()
-					socketConn.ConnStatus = 1
-					socketConn.Sync.Unlock()
+					log.Warn("Another user signed in as ", conn.RemoteAddr().String())
+					marshalAndSend(map[string]string{"code": "2"}, socketConn, false)
+					socketConn.ConnAlive = false
+					socketConn.KeepInDb = true
 					conn.Close()
-					callbackChan <- 3
+					socketConn.Callback <- 2
+					return
+				} else if state == 3 {
+					log.Warn("Too many errors for ", conn.RemoteAddr().String())
+					marshalAndSend(map[string]string{"code": "5"}, socketConn, false)
+					socketConn.ConnAlive = false
+					conn.Close()
+					socketConn.Callback <- 3
 					return
 				}
 			case data := <-msgChan:
 				if data.ReadError != nil || data.Code == -1 {
 					socketConn.Sync.Lock()
-					socketConn.ConnStatus = 1
+					socketConn.ConnAlive = false
 					socketConn.Sync.Unlock()
+					conn.Close()
 					return
 				} else {
 					fmt.Println(data.Msg)
@@ -346,7 +375,86 @@ func SockHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func RedisTokenLoop(rChan chan *RedisToken) {
+//Add max number of messages read
+//something like 60 messages per min
+func socketReadLoop(socketConn *SocketConn, msgChan chan *WebsocketMessage) {
+	defer fmt.Println("Readloop exited")
+	remoteAddr := socketConn.Conn.RemoteAddr().String()
+	errCount := 0
+	for {
+		if errCount > 3 {
+			socketConn.Sync.Lock()
+			if socketConn.ConnAlive {
+				socketConn.Callback <- 3
+				if <-socketConn.Callback == 3 {
+					socketConn.Sync.Unlock()
+					return
+				}
+			} else {
+				socketConn.Sync.Unlock()
+				return
+			}
+		}
+
+		mType, data, err := socketConn.Conn.ReadMessage()
+		if err != nil {
+			if websocket.IsCloseError(err, 1001) == true {
+				log.Info("Client ", remoteAddr, " went away")
+			} else if !socketConn.ConnAlive {
+				log.Warn(remoteAddr, " socket connection forcibly closed")
+			} else {
+				log.Error("Read message error for ", remoteAddr, ": ", err.Error())
+			}
+			if !socketConn.KeepInDb {
+				redisChan <- &RedisToken{
+					Code : 1,
+					Sid : socketConn.Sid,
+				}
+			}
+			if socketConn.ConnAlive {
+				msgChan <- &WebsocketMessage{
+					Code : -1,
+				}
+			}
+			return
+		}
+
+		payload, parseErr := jason.NewObjectFromBytes(data)
+		if parseErr != nil {
+			log.Error("Message parse error for ", remoteAddr, ": ", parseErr.Error())
+			errCount++
+			marshalAndSend(map[string]string{"code":"4"}, socketConn, true)
+			continue
+
+		}
+
+		msgCode, msgCodeErr := payload.GetString("code")
+		if msgCodeErr != nil {
+			log.Warn("No field code in received message ", remoteAddr)
+			errCount++
+			marshalAndSend(map[string]string{"code":"4"}, socketConn, true)
+			continue
+		}
+
+		code, convErr := strconv.Atoi(msgCode)
+		if convErr != nil {
+			log.Error("Error converting code to int for ", remoteAddr, ": ", convErr.Error())
+			errCount++
+			marshalAndSend(map[string]string{"code":"4"}, socketConn, true)
+			continue
+		}
+
+		msgChan <- &WebsocketMessage{
+			MsgType : mType,
+			Msg : payload,
+			Code : code,
+			ReadError : err,
+		}
+	}
+}
+
+func redisLoop(rChan chan *RedisToken) {
+	callback := make(chan *SocketConn)
 	for {
 		input := <-rChan
 		//db 0 for tokens 1 for steamids
@@ -355,23 +463,25 @@ func RedisTokenLoop(rChan chan *RedisToken) {
 			if _, err := redis.Do("SELECT", "0"); err != nil {
 				log.Error("Error changing redis database: ", err.Error())
 			}
+			//Check if token has only been used once
 			tVal, redisTErr := redis.Do("SET", input.Token, input.Sid, "NX", "EX", strconv.Itoa(TOKEN_VALID_TIME))
 			if redisTErr != nil {
 				log.Error("Error setting token in redis: ", redisTErr.Error())
 				input.Callback <- 1
 				continue
 			}
+			//If new token, check if another user is logged in already with same sid
 			if tVal != nil {
 				if _, err := redis.Do("SELECT", "1"); err != nil {
 					log.Error("Error changing redis database: ", err.Error())
 				}
 				gVal, _ := redis.Do("SET", "online."+input.Sid, input.Sid, "NX")
-				fmt.Println(input.Sid)
+				//if no duplicate sid is found send 0 to callback asking socket to proceed
 				if gVal != nil {
 					input.Callback <- 0
 					continue
 				} else {
-					callback := make(chan *SocketConn)
+					//else check if sid is active in broadcast loop
 					broadcastChan <- &Broadcast{
 						Code : 2,
 						Conn : &SocketConn{
@@ -380,14 +490,17 @@ func RedisTokenLoop(rChan chan *RedisToken) {
 						Callback : callback,
 					}
 					closeClient := <-callback
-					if closeClient.ConnStatus == 0 {
+					//if client is active, close its connection and proceed with current socket
+					closeClient.Sync.Lock()
+					if closeClient.ConnAlive {
 						closeClient.Callback <- 2
-						if <-closeClient.Callback == 3 {
+						if <-closeClient.Callback == 2 {
 							input.Callback <- 0
 						}
 					} else {
 						input.Callback <- 0
 					}
+					closeClient.Sync.Unlock()
 				}
 			} else {
 				input.Callback <- 1
@@ -395,6 +508,7 @@ func RedisTokenLoop(rChan chan *RedisToken) {
 		} else if input.Code == 1 {
 			if _, err := redis.Do("SELECT", "1"); err != nil {
 				log.Error("Error changing redis database: ", err.Error())
+				continue
 			}
 			redis.Do("DEL", "online."+input.Sid)
 			log.Info("Removed ", input.Sid, " from redis")
@@ -413,21 +527,34 @@ func broadcastLoop(broadcastChan chan *Broadcast) {
 			tempConns := make([]*SocketConn, 0)
 			for _, key := range activeConns {
 				key.Sync.Lock()
-				if key.ConnStatus == 0 {
+				if key.ConnAlive {
 					tempConns = append(tempConns, key)
 				}
 				key.Sync.Unlock()
 			}
 			activeConns = tempConns
 		} else if input.Code == 2 {
+			found := false
 			for _, key := range activeConns {
 				if key.Sid == input.Conn.Sid {
 					input.Callback <- key
+					found = true
+					break
+				}
+			}
+			if found {
+				continue
+			} else {
+				input.Callback <- &SocketConn{
+					//Doesnt exist
+					ConnAlive : false,
 				}
 			}
 		} else if input.Code == 3 {
 			for _, key := range activeConns {
-				go MarshalAndSend(map[string]string{"kek":"kek"}, key, 1)
+				if key.ConnAlive {
+					go marshalAndSend(map[string]string{"kek":"kek"}, key, true)
+				}
 			}
 		}
 		fmt.Println(activeConns)
@@ -437,47 +564,14 @@ func broadcastLoop(broadcastChan chan *Broadcast) {
 func broadcastCleanup(broadcastChan chan *Broadcast) {
 	for {
 		time.Sleep(time.Second * CLEANUP_DELAY)
-		broadcast := &Broadcast{
+		broadcastChan <- &Broadcast{
 			Code : 1,
-		}
-		broadcastChan <- broadcast
-	}
-}
-
-func socketReadLoop(socketConn *SocketConn, msgChan chan *WebsocketMessage) {
-	for {
-		mType, data, err := socketConn.Conn.ReadMessage()
-		if err != nil {
-			if websocket.IsCloseError(err, 1001) == true {
-				log.Info("Client went away")
-			} else if socketConn.ConnStatus == 1 {
-				log.Info("Client connection forcibly closed")
-			} else {
-				log.Error("Read message error ", err.Error())
-			}
-			msgChan <- &WebsocketMessage{
-				Code : -1,
-			}
-			redisTokenChan <- &RedisToken{
-				Code : 2,
-				Sid : socketConn.Sid,
-			}
-			return
-		}
-		payload, _ := jason.NewObjectFromBytes(data)
-		msgCode, _ := payload.GetString("code")
-		code, _ := strconv.Atoi(msgCode)
-		msgChan <- &WebsocketMessage{
-			MsgType : mType,
-			Msg : payload,
-			Code : code,
-			ReadError : err,
 		}
 	}
 }
 
 func OidHandler(w http.ResponseWriter, r *http.Request) {
-	mode := TrimNullBytes(mux.Vars(r)["mode"])
+	mode := trimNullBytes(mux.Vars(r)["mode"])
 	if mode == "login" {
 		OidLoginHandler(w, r, false)
 	} else if mode == "login_s" {
@@ -502,7 +596,7 @@ func OidLogoutHandler(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "https://"+HOST_ADDR, http.StatusMovedPermanently)
 	}
 	if !session.IsNew {
-		RemoveSessionCookie(session, w, r)
+		removeSessionCookie(session, w, r)
 	}
 
 	log.Info("Logout sequence finished for ", r.RemoteAddr, " redirecting to /")
@@ -544,7 +638,7 @@ func OidAuthHandler(w http.ResponseWriter, r *http.Request, saveSession bool) {
 
 	var steam64id string
 	if len(params.Get("openid.identity")) == 53 {
-		steam64id = TrimNullBytes(params.Get("openid.identity"))[36:53]
+		steam64id = trimNullBytes(params.Get("openid.identity"))[36:53]
 		match, regErr := regexp.MatchString("[0-9]", steam64id)
 		if match == false {
 			log.Warn("Invalid (non-numeric) steam64 ID returned for ", r.RemoteAddr, ", redirecting to /")
@@ -604,7 +698,7 @@ func OidAuthHandler(w http.ResponseWriter, r *http.Request, saveSession bool) {
 
 			log.Info("Generated session cookie for ", r.RemoteAddr)
 		} else {
-			if GenSockAuthCookie(w, r, steam64id) != nil {
+			if genSockAuthCookie(w, r, steam64id) != nil {
 				http.Redirect(w, r, "https://"+HOST_ADDR+"/", http.StatusMovedPermanently)
 				return
 			}
@@ -620,7 +714,7 @@ func OidAuthHandler(w http.ResponseWriter, r *http.Request, saveSession bool) {
 	}
 }
 
-func RemoveSessionCookie(session *sessions.Session, w http.ResponseWriter, r *http.Request) {
+func removeSessionCookie(session *sessions.Session, w http.ResponseWriter, r *http.Request) {
 	session.Options = &sessions.Options{
 		Path:     "/",
 		HttpOnly: true,
@@ -634,7 +728,7 @@ func RemoveSessionCookie(session *sessions.Session, w http.ResponseWriter, r *ht
 	log.Info("Requested removal of session for ", r.RemoteAddr)
 }
 
-func GenSockAuthCookie(w http.ResponseWriter, r *http.Request, steam64id string) error {
+func genSockAuthCookie(w http.ResponseWriter, r *http.Request, steam64id string) error {
 	tokenExp := time.Now().Add(time.Second * TOKEN_VALID_TIME)
 
 	//TODO add mode field "websocket"
@@ -664,7 +758,7 @@ func GenSockAuthCookie(w http.ResponseWriter, r *http.Request, steam64id string)
 	return nil
 }
 
-func TrimNullBytes(input string) string {
+func trimNullBytes(input string) string {
 	return string(bytes.Trim([]byte(input), "\x00"))
 }
 
@@ -785,16 +879,16 @@ func main() {
 		return
 	}
 	redis = redisConn
-	//TODO generate password from /dev/random
 	if _, err := redis.Do("AUTH", strings.Trim(string(redisKey), "\n")); err != nil {
 		log.Fatal("Error authenticating with redis: ", err.Error())
 	}
-	go RedisTokenLoop(redisTokenChan)
-	log.Info("Loaded redis")
+	go redisLoop(redisChan)
+	cleanup()
+	log.Info("Started redis")
 
 	go broadcastLoop(broadcastChan)
 	go broadcastCleanup(broadcastChan)
-	log.Info("Loaded broadcast loop")
+	log.Info("Started broadcast loop")
 
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt)

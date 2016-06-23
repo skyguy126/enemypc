@@ -39,5 +39,8 @@ End loading animation and display username and avatar
 Status codes:
 0 = token auth result (success or failure) {"code":"0","is_valid":"true"}
 1 = userdata (nickname and avatar) {"avatar":LINK TO AVATAR,"code":"1","nickname":"Anthony Larson"}
-2 = someone else logged in as this user, socket closed {"code": "2"}
+2 = someone else logged in as this user, socket closed  {"code": "2"}
 3 = chat message TODO TBD
+4 Internal server error {"code": "4"}
+5 Too many errors, connection closed {"code":"5"}
+6 Steam community profile not setup or is private/friends only {"code": "5"}
